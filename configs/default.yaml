@@ -1,0 +1,27 @@
+project_name: llm_pruning_project
+seed: 7
+
+calibration:
+  source: wikitext103
+  dataset_name: Salesforce/wikitext
+  dataset_config: wikitext-103-raw-v1
+  split: train
+  text_key: text
+  max_texts: 64
+  min_chars: 20
+  max_length: 64
+  batch_size: 4
+
+model:
+  name: distilgpt2
+  layer_name: transformer.h.0.mlp.c_fc
+
+pruning:
+  target_sparsity_grid: [0.3, 0.5, 0.7]
+  fista_iters: 20
+  lambda_low: 1.0e-6
+  lambda_high: 1.0
+  search_steps: 12
+  sparsity_tol: 0.02
+  adaptive_r_min: 0.5
+  adaptive_r_max: 1.5
