@@ -6,6 +6,11 @@ This repository implements an **LLM layer-wise pruning** experiment framework.
 The current codebase focuses on real-layer activation collection from `distilgpt2`,
 single-layer pruning, post-pruning fine-tuning, and sequential multi-layer pruning.
 
+Install the required packages with:
+
+```bash
+pip install -r requirements.txt
+```
 The project is organized into three levels:
 
 1. Mainline
