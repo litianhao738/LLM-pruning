@@ -7,6 +7,7 @@ The current project mainline uses:
 - corrected `nopad` activation collection
 - `perplexity-first` evaluation
 - masked fine-tuning, meaning pruned weights stay at zero during fine-tuning
+- a unified reconstruction-error definition: reconstruction is recorded at pruning time, before fine-tuning
 - four main methods:
   - `magnitude`
   - `fista`

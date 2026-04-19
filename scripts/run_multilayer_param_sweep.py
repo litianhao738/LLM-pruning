@@ -279,6 +279,8 @@ def _summarize_run(
         "final_layer_name": final_layer["layer_name"],
         "final_actual_sparsity": _to_float(final_layer.get("actual_sparsity")),
         "final_target_gap": _to_float(final_layer.get("target_gap")),
+        "final_pruning_reconstruction_error": _to_float(final_layer.get("reconstruction_error")),
+        # Backward-compatible alias. Reports should prefer final_pruning_reconstruction_error.
         "final_reconstruction_error": _to_float(final_layer.get("reconstruction_error")),
         "final_selected_lambda": _to_float(final_layer.get("selected_lambda")),
         "before_nll": _to_float(eval_before.get("average_nll")),

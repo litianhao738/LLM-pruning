@@ -1,8 +1,10 @@
+from pathlib import Path
 from typing import Any
 
 import torch
 
 from data.calibration import load_calibration_text_corpus
+from pruning.base import PruneResult
 from pruning import (
     AdaptiveThresholdFISTAPruner,
     FISTAPruner,
@@ -11,6 +13,10 @@ from pruning import (
     OriginalGradientAwareMomentumFISTAPruner,
     find_lambda_for_target_sparsity,
 )
+from utils.io_utils import load_tensor_bundle, save_tensor_bundle
+
+
+PRUNE_CACHE_SUBDIR = "prune_cache"
 
 
 def parse_methods(raw: str) -> list[str]:
@@ -232,4 +238,83 @@ def build_prune_result(
             "num_trials": len(search.trials),
             "trials": search.trials,
         },
+    }
+
+
+def prune_cache_path(cache_root: str | Path, method: str) -> Path:
+    return Path(cache_root) / PRUNE_CACHE_SUBDIR / f"{method}.pt"
+
+
+def save_prune_cache(
+    *,
+    cache_root: str | Path,
+    method: str,
+    bundle_path: str | Path,
+    target_sparsity: float,
+    num_iters: int,
+    search_steps: int,
+    sparsity_tol: float,
+    settings: dict[str, float | None],
+    prune_info: dict[str, Any],
+) -> Path:
+    prune_result: PruneResult = prune_info["prune_result"]
+    payload = {
+        "metadata": {
+            "method": method,
+            "bundle_path": str(Path(bundle_path).resolve()),
+            "target_sparsity": float(target_sparsity),
+            "num_iters": int(num_iters),
+            "search_steps": int(search_steps),
+            "sparsity_tol": float(sparsity_tol),
+            "settings": dict(settings),
+        },
+        "U": prune_result.U.detach().cpu(),
+        "stats": dict(prune_result.stats),
+        "history": list(prune_result.history),
+        "selected_lambda": prune_info["selected_lambda"],
+        "search": prune_info["search"],
+    }
+    target = prune_cache_path(cache_root, method)
+    save_tensor_bundle(payload, target)
+    return target
+
+
+def load_prune_cache(
+    *,
+    cache_root: str | Path,
+    method: str,
+    bundle_path: str | Path,
+    target_sparsity: float,
+    num_iters: int,
+    search_steps: int,
+    sparsity_tol: float,
+    settings: dict[str, float | None],
+) -> dict[str, Any] | None:
+    target = prune_cache_path(cache_root, method)
+    if not target.exists():
+        return None
+
+    payload = load_tensor_bundle(target)
+    metadata = payload.get("metadata", {})
+    expected = {
+        "method": method,
+        "bundle_path": str(Path(bundle_path).resolve()),
+        "target_sparsity": float(target_sparsity),
+        "num_iters": int(num_iters),
+        "search_steps": int(search_steps),
+        "sparsity_tol": float(sparsity_tol),
+        "settings": dict(settings),
+    }
+    if metadata != expected:
+        return None
+
+    return {
+        "prune_result": PruneResult(
+            U=payload["U"],
+            stats=dict(payload.get("stats", {})),
+            history=list(payload.get("history", [])),
+        ),
+        "selected_lambda": payload.get("selected_lambda"),
+        "search": payload.get("search"),
+        "cache_path": target,
     }

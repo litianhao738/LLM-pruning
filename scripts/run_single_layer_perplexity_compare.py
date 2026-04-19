@@ -16,6 +16,7 @@ from models.hooks import apply_weight_matrix, resolve_module
 from utils.io_utils import load_tensor_bundle, save_csv_rows, save_json
 from utils.single_layer_utils import (
     build_prune_result,
+    save_prune_cache,
     method_settings,
     parse_methods,
     select_eval_texts,
@@ -151,6 +152,17 @@ def main() -> None:
             bracket_scale=args.bracket_scale,
             max_bracket_steps=args.max_bracket_steps,
         )
+        cache_path = save_prune_cache(
+            cache_root=output_dir,
+            method=method,
+            bundle_path=args.bundle_path,
+            target_sparsity=args.target_sparsity,
+            num_iters=args.iters,
+            search_steps=args.search_steps,
+            sparsity_tol=args.sparsity_tol,
+            settings=settings,
+            prune_info=prune_info,
+        )
         prune_result = prune_info["prune_result"]
 
         model = copy.deepcopy(base_model)
@@ -184,6 +196,8 @@ def main() -> None:
             "after_pruning_perplexity": float(after_metrics["perplexity"]),
             "delta_average_nll": float(after_metrics["average_nll"] - before_metrics["average_nll"]),
             "delta_perplexity": float(after_metrics["perplexity"] - before_metrics["perplexity"]),
+            "pruning_reconstruction_error": prune_result.stats.get("reconstruction_error"),
+            # Backward-compatible alias. Reports should prefer pruning_reconstruction_error.
             "reconstruction_error": prune_result.stats.get("reconstruction_error"),
             "objective": prune_result.stats.get("objective"),
             "last_diff_norm": last_history.get("diff_norm"),
@@ -198,6 +212,7 @@ def main() -> None:
                 if prune_info["search"] is None
                 else prune_info["search"]["terminated_reason"]
             ),
+            "prune_cache_path": str(cache_path),
         }
         summary_rows.append(summary_row)
 

@@ -19,6 +19,7 @@ from utils.finetune_masks import apply_parameter_masks, build_module_weight_mask
 from utils.io_utils import load_tensor_bundle, save_csv_rows, save_json
 from utils.single_layer_utils import (
     build_prune_result,
+    load_prune_cache,
     method_settings,
     parse_methods,
     select_finetune_and_eval_texts,
@@ -28,6 +29,7 @@ from utils.single_layer_utils import (
 
 DEFAULT_BUNDLE_PATH = Path("artifacts") / "distilgpt2_h0_attn_cproj_wikitext128_bundle_nopad.pt"
 DEFAULT_OUTPUT_DIR = Path("artifacts") / "single_layer_prune_then_finetune_compare_nopad"
+DEFAULT_PRUNE_CACHE_DIR = Path("artifacts") / "single_layer_mainline"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -70,6 +72,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--disable-progress", action="store_true")
     parser.add_argument("--output-dir", type=str, default=str(DEFAULT_OUTPUT_DIR))
+    parser.add_argument(
+        "--prune-cache-dir",
+        type=str,
+        default=str(DEFAULT_PRUNE_CACHE_DIR),
+        help=(
+            "Directory containing per-method single-layer pruning caches. "
+            "If a matching cache is found, fine-tuning reuses that exact pruning result."
+        ),
+    )
     parser.add_argument("--calibration-source", type=str, default="wikitext103")
     parser.add_argument("--calibration-dataset-name", type=str, default="Salesforce/wikitext")
     parser.add_argument("--calibration-dataset-config", type=str, default="wikitext-103-raw-v1")
@@ -157,6 +168,7 @@ def main() -> None:
     methods = parse_methods(args.methods)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    prune_cache_dir = Path(args.prune_cache_dir)
 
     set_seed(args.seed)
     device = torch.device(args.device)
@@ -212,18 +224,30 @@ def main() -> None:
             gradient_r_max=args.gradient_r_max,
             gradient_momentum_beta=args.gradient_momentum_beta,
         )
-        prune_info = build_prune_result(
+        prune_info = load_prune_cache(
+            cache_root=prune_cache_dir,
             method=method,
+            bundle_path=args.bundle_path,
             target_sparsity=args.target_sparsity,
-            W=W,
-            X=X,
             num_iters=args.iters,
             search_steps=args.search_steps,
             sparsity_tol=args.sparsity_tol,
-            show_progress=not args.disable_progress,
-            progress_desc=f"{method} lambda search",
             settings=settings,
         )
+        used_pruning_cache = prune_info is not None
+        if prune_info is None:
+            prune_info = build_prune_result(
+                method=method,
+                target_sparsity=args.target_sparsity,
+                W=W,
+                X=X,
+                num_iters=args.iters,
+                search_steps=args.search_steps,
+                sparsity_tol=args.sparsity_tol,
+                show_progress=not args.disable_progress,
+                progress_desc=f"{method} lambda search",
+                settings=settings,
+            )
         prune_result = prune_info["prune_result"]
 
         model = copy.deepcopy(base_model).to(device)
@@ -294,6 +318,8 @@ def main() -> None:
                 "delta_pruning_perplexity": float(after_prune_metrics["perplexity"] - before_metrics["perplexity"]),
                 "delta_finetuning_perplexity": float(after_finetune_metrics["perplexity"] - before_metrics["perplexity"]),
                 "delta_recovery_perplexity": float(after_finetune_metrics["perplexity"] - after_prune_metrics["perplexity"]),
+                "pruning_reconstruction_error": prune_result.stats.get("reconstruction_error"),
+                # Backward-compatible alias. Reports should prefer pruning_reconstruction_error.
                 "reconstruction_error": prune_result.stats.get("reconstruction_error"),
                 "objective": prune_result.stats.get("objective"),
                 "last_diff_norm": last_history.get("diff_norm"),
@@ -307,6 +333,10 @@ def main() -> None:
                     "not_applicable"
                     if prune_info["search"] is None
                     else prune_info["search"]["terminated_reason"]
+                ),
+                "used_pruning_cache": used_pruning_cache,
+                "prune_cache_path": (
+                    str(prune_info["cache_path"]) if used_pruning_cache else None
                 ),
             }
         )
@@ -365,6 +395,8 @@ def main() -> None:
             "weight_decay": float(args.weight_decay),
             "grad_clip": float(args.grad_clip),
             "preserve_pruning_mask": True,
+            "reconstruction_error_definition": "pruning_stage_only",
+            "prune_cache_dir": str(prune_cache_dir),
             "finetune_texts": len(finetune_texts),
             "eval_texts": len(eval_texts),
             "seed": int(args.seed),

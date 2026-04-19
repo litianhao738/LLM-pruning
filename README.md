@@ -59,7 +59,7 @@ The workflow is:
 
 1. Collect real activations from a target layer.
 2. Prune weights using one method at a matched target sparsity.
-3. Evaluate with perplexity and reconstruction error.
+3. Evaluate with perplexity and pruning-stage reconstruction error.
 4. Optionally fine-tune while **preserving the pruning mask**.
 5. Repeat the same process for sequential multi-layer pruning.
 
@@ -199,7 +199,9 @@ The most important metrics are:
 - `target_gap`
 - `after_pruning_perplexity`
 - `after_finetuning_perplexity`
-- `reconstruction_error`
+- `pruning_reconstruction_error`
+
+`pruning_reconstruction_error` is defined consistently as the layer reconstruction error computed immediately after pruning and before any fine-tuning. It is a pruning-stage diagnostic, not a post-fine-tuning metric.
 
 ## Notes
 

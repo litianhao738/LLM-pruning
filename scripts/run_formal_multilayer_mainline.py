@@ -135,6 +135,8 @@ def _build_summary_row(
         "final_layer_name": final_layer.get("layer_name"),
         "final_actual_sparsity": final_layer.get("actual_sparsity"),
         "final_target_gap": final_layer.get("target_gap"),
+        "final_pruning_reconstruction_error": final_layer.get("reconstruction_error"),
+        # Backward-compatible alias. Reports should prefer final_pruning_reconstruction_error.
         "final_reconstruction_error": final_layer.get("reconstruction_error"),
         "final_selected_lambda": final_layer.get("selected_lambda"),
         "before_average_nll": initial_metrics.get("average_nll"),
