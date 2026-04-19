@@ -16,8 +16,9 @@ from data.calibration import load_calibration_text_corpus
 from eval.reconstruction import reconstruction_error
 from eval.perplexity import evaluate_perplexity_on_texts
 from models.hooks import ActivationHook, apply_weight_matrix, extract_weight_matrix, resolve_module
-from pruning import GradientAwareMomentumFISTAPruner, MagnitudePruner, find_lambda_for_target_sparsity
+from utils.finetune_masks import apply_parameter_masks, build_module_weight_masks, mask_parameter_grads
 from utils.io_utils import save_csv_rows, save_json
+from utils.single_layer_utils import build_prune_result, method_settings, set_seed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,7 +30,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--method",
         type=str,
-        choices=["magnitude", "gradient_momentum_fista"],
+        choices=[
+            "magnitude",
+            "fista",
+            "adaptive_fista",
+            "gradient_momentum_fista",
+            "gradient_momentum_fista_original",
+        ],
         default="gradient_momentum_fista",
     )
     parser.add_argument("--target-sparsity", type=float, default=0.5)
@@ -112,6 +119,7 @@ def _run_finetuning(
     learning_rate: float,
     weight_decay: float,
     grad_clip: float,
+    parameter_masks: list[tuple[torch.nn.Parameter, torch.Tensor]],
     show_progress: bool,
 ) -> list[dict[str, float]]:
     params = [param for param in model.parameters() if param.requires_grad]
@@ -149,9 +157,11 @@ def _run_finetuning(
         outputs = model(**encoded, labels=labels)
         loss = outputs.loss
         loss.backward()
+        mask_parameter_grads(parameter_masks)
         if grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(params, grad_clip)
         optimizer.step()
+        apply_parameter_masks(parameter_masks)
 
         history.append(
             {
@@ -173,9 +183,11 @@ def _collect_layer_problem(
     batch_size: int,
     device: torch.device,
     show_progress: bool,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, float | int]]:
     module = resolve_module(model, layer_name)
-    hook = ActivationHook(module=module, move_to_cpu=True, flatten_batch=True)
+    capture_on_cpu = device.type != "cuda"
+    hook = ActivationHook(module=module, move_to_cpu=capture_on_cpu, flatten_batch=True)
+    attention_masks: list[torch.Tensor] = []
 
     try:
         model.eval()
@@ -192,54 +204,38 @@ def _collect_layer_problem(
                     truncation=True,
                     max_length=max_length,
                 )
+                batch_attention_mask = encoded.get("attention_mask")
+                if batch_attention_mask is None:
+                    batch_attention_mask = torch.ones_like(encoded["input_ids"])
+                attention_masks.append(batch_attention_mask.detach().cpu())
                 encoded = {key: value.to(device) for key, value in encoded.items()}
                 model(**encoded)
-        X = hook.stacked_inputs().to(dtype=torch.float32)
+        X = hook.stacked_inputs(attention_masks=attention_masks).to(dtype=torch.float32)
     finally:
         hook.close()
 
-    W = extract_weight_matrix(module)
-    return W, X
-
-
-def _build_prune_result(args: argparse.Namespace, W: torch.Tensor, X: torch.Tensor) -> tuple[Any, float | None, dict[str, Any] | None]:
-    if args.method == "magnitude":
-        result = MagnitudePruner(sparsity=args.target_sparsity).prune(W=W, X=X)
-        return result, None, None
-
-    search = find_lambda_for_target_sparsity(
-        pruner_cls=GradientAwareMomentumFISTAPruner,
-        W=W,
-        X=X,
-        target_sparsity=args.target_sparsity,
-        num_iters=args.iters,
-        search_steps=args.search_steps,
-        sparsity_tol=args.sparsity_tol,
-        pruner_kwargs={
-            "r_min": args.r_min,
-            "r_max": args.r_max,
-            "momentum_beta": args.momentum_beta,
-        },
-        show_progress=not args.disable_progress,
-        progress_desc="gradient_momentum_fista lambda search",
+    W = extract_weight_matrix(
+        module,
+        device=None if capture_on_cpu else device,
     )
-    search_info = {
-        "target_sparsity": float(search.target_sparsity),
-        "best_lambda": float(search.best_lambda),
-        "best_actual_sparsity": float(search.best_actual_sparsity),
-        "best_gap": float(search.best_gap),
-        "bracket_low": float(search.bracket_low),
-        "bracket_high": float(search.bracket_high),
-        "bracket_found": bool(search.bracket_found),
-        "terminated_reason": search.terminated_reason,
-        "num_trials": len(search.trials),
+    valid_token_count = int(sum(mask.sum().item() for mask in attention_masks))
+    padded_token_count = int(sum(mask.numel() - mask.sum().item() for mask in attention_masks))
+    collection_stats: dict[str, float | int] = {
+        "num_samples": int(X.shape[1]),
+        "num_valid_tokens": valid_token_count,
+        "num_padding_tokens_excluded": padded_token_count,
+        "padding_fraction_excluded": (
+            float(padded_token_count / (valid_token_count + padded_token_count))
+            if (valid_token_count + padded_token_count) > 0
+            else 0.0
+        ),
     }
-    return search.best_result, float(search.best_lambda), search_info
+    return W, X, collection_stats
 
 
 def main() -> None:
     args = build_parser().parse_args()
-    torch.manual_seed(args.seed)
+    set_seed(args.seed)
 
     layer_names = _parse_layer_names(args.layer_names)
     output_dir = _resolve_output_dir(
@@ -269,6 +265,7 @@ def main() -> None:
     )
 
     device = torch.device(args.device)
+    pruning_device = device if device.type == "cuda" else torch.device("cpu")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -304,7 +301,7 @@ def main() -> None:
         layer_iterator = tqdm(list(layer_iterator), desc="Pruning layers")
 
     for layer_index, layer_name in layer_iterator:
-        W, X = _collect_layer_problem(
+        W, X, collection_stats = _collect_layer_problem(
             model=model,
             tokenizer=tokenizer,
             texts=calibration_texts,
@@ -314,8 +311,30 @@ def main() -> None:
             device=device,
             show_progress=not args.disable_progress,
         )
+        W = W.to(device=pruning_device, dtype=torch.float32)
+        X = X.to(device=pruning_device, dtype=torch.float32)
 
-        prune_result, selected_lambda, search_info = _build_prune_result(args, W, X)
+        settings = method_settings(
+            args.method,
+            default_r_min=args.r_min,
+            default_r_max=args.r_max,
+            default_momentum_beta=args.momentum_beta,
+        )
+        prune_bundle = build_prune_result(
+            method=args.method,
+            target_sparsity=args.target_sparsity,
+            W=W,
+            X=X,
+            num_iters=args.iters,
+            search_steps=args.search_steps,
+            sparsity_tol=args.sparsity_tol,
+            show_progress=not args.disable_progress,
+            progress_desc=f"{args.method} lambda search",
+            settings=settings,
+        )
+        prune_result = prune_bundle["prune_result"]
+        selected_lambda = prune_bundle["selected_lambda"]
+        search_info = prune_bundle["search"]
 
         target_module = resolve_module(model, layer_name)
         apply_weight_matrix(target_module, prune_result.U)
@@ -342,6 +361,7 @@ def main() -> None:
             "post_layer_average_nll": float(layer_metrics["average_nll"]),
             "post_layer_perplexity": float(layer_metrics["perplexity"]),
         }
+        summary_row.update(collection_stats)
         summary_row.update(prune_result.stats)
         summary_rows.append(summary_row)
 
@@ -376,6 +396,7 @@ def main() -> None:
     after_finetune_metrics = None
     if args.finetune_steps > 0:
         target_modules = [resolve_module(model, layer_name) for layer_name in layer_names]
+        parameter_masks = build_module_weight_masks(target_modules)
         _freeze_except_modules(model, target_modules)
         finetune_history = _run_finetuning(
             model=model,
@@ -388,6 +409,7 @@ def main() -> None:
             learning_rate=args.learning_rate,
             weight_decay=args.weight_decay,
             grad_clip=args.grad_clip,
+            parameter_masks=parameter_masks,
             show_progress=not args.disable_progress,
         )
         for entry in finetune_history:
@@ -438,6 +460,7 @@ def main() -> None:
             "learning_rate": float(args.learning_rate),
             "weight_decay": float(args.weight_decay),
             "grad_clip": float(args.grad_clip),
+            "preserve_pruning_mask": True,
             "eval_texts": len(eval_texts),
             "seed": int(args.seed),
         },

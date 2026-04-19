@@ -13,17 +13,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from data.calibration import load_calibration_text_corpus
 from eval.perplexity import evaluate_perplexity_on_texts
 from models.hooks import apply_weight_matrix, resolve_module
-from pruning import (
-    AdaptiveThresholdFISTAPruner,
-    FISTAPruner,
-    GradientAwareMomentumFISTAPruner,
-    MagnitudePruner,
-    find_lambda_for_target_sparsity,
-)
+from utils.finetune_masks import apply_parameter_masks, build_module_weight_masks, mask_parameter_grads
 from utils.io_utils import load_tensor_bundle, save_json
+from utils.single_layer_utils import (
+    build_prune_result,
+    method_settings,
+    select_finetune_and_eval_texts,
+    set_seed,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,7 +35,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--method",
         type=str,
-        choices=["magnitude", "fista", "adaptive_fista", "gradient_momentum_fista"],
+        choices=[
+            "magnitude",
+            "fista",
+            "adaptive_fista",
+            "gradient_momentum_fista",
+            "gradient_momentum_fista_original",
+        ],
         default="gradient_momentum_fista",
     )
     parser.add_argument("--target-sparsity", type=float, default=0.5)
@@ -73,73 +78,6 @@ def _resolve_output_path(raw: str | None, *, method: str, target_sparsity: float
         return Path(raw)
     return Path("artifacts") / f"prune_then_finetune_{method}_s{target_sparsity:.2f}.json"
 
-
-def _build_prune_result(args: argparse.Namespace, W: torch.Tensor, X: torch.Tensor) -> dict[str, Any]:
-    if args.method == "magnitude":
-        pruner = MagnitudePruner(sparsity=args.target_sparsity)
-        result = pruner.prune(W=W, X=X)
-        return {
-            "prune_result": result,
-            "selected_lambda": None,
-            "search": None,
-        }
-
-    method_map = {
-        "fista": (FISTAPruner, {}),
-        "adaptive_fista": (
-            AdaptiveThresholdFISTAPruner,
-            {"r_min": args.r_min, "r_max": args.r_max},
-        ),
-        "gradient_momentum_fista": (
-            GradientAwareMomentumFISTAPruner,
-            {
-                "r_min": args.r_min,
-                "r_max": args.r_max,
-                "momentum_beta": args.momentum_beta,
-            },
-        ),
-    }
-    pruner_cls, pruner_kwargs = method_map[args.method]
-    search = find_lambda_for_target_sparsity(
-        pruner_cls=pruner_cls,
-        W=W,
-        X=X,
-        target_sparsity=args.target_sparsity,
-        num_iters=args.iters,
-        search_steps=args.search_steps,
-        sparsity_tol=args.sparsity_tol,
-        pruner_kwargs=pruner_kwargs,
-        show_progress=not args.disable_progress,
-        progress_desc=f"{args.method} lambda search",
-    )
-    return {
-        "prune_result": search.best_result,
-        "selected_lambda": float(search.best_lambda),
-        "search": {
-            "target_sparsity": float(search.target_sparsity),
-            "best_lambda": float(search.best_lambda),
-            "best_actual_sparsity": float(search.best_actual_sparsity),
-            "best_gap": float(search.best_gap),
-            "bracket_low": float(search.bracket_low),
-            "bracket_high": float(search.bracket_high),
-            "bracket_found": bool(search.bracket_found),
-            "terminated_reason": search.terminated_reason,
-            "num_trials": len(search.trials),
-        },
-    }
-
-
-def _split_texts(texts: list[str], finetune_count: int, eval_count: int) -> tuple[list[str], list[str]]:
-    required = finetune_count + eval_count
-    if len(texts) < required:
-        raise ValueError(
-            f"Not enough texts for split: need {required}, got {len(texts)}"
-        )
-    finetune_texts = texts[:finetune_count]
-    eval_texts = texts[finetune_count : finetune_count + eval_count]
-    return finetune_texts, eval_texts
-
-
 def _freeze_except_module(model: torch.nn.Module, target_module: torch.nn.Module) -> None:
     for parameter in model.parameters():
         parameter.requires_grad = False
@@ -159,6 +97,7 @@ def _run_finetuning(
     learning_rate: float,
     weight_decay: float,
     grad_clip: float,
+    parameter_masks: list[tuple[torch.nn.Parameter, torch.Tensor]],
     show_progress: bool,
 ) -> list[dict[str, float]]:
     params = [param for param in model.parameters() if param.requires_grad]
@@ -194,9 +133,11 @@ def _run_finetuning(
         outputs = model(**encoded, labels=labels)
         loss = outputs.loss
         loss.backward()
+        mask_parameter_grads(parameter_masks)
         if grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(params, grad_clip)
         optimizer.step()
+        apply_parameter_masks(parameter_masks)
 
         history.append(
             {
@@ -210,9 +151,10 @@ def _run_finetuning(
 
 def main() -> None:
     args = build_parser().parse_args()
-    torch.manual_seed(args.seed)
+    set_seed(args.seed)
 
     device = torch.device(args.device)
+    pruning_device = device if device.type == "cuda" else torch.device("cpu")
     output_path = _resolve_output_path(
         args.output_path,
         method=args.method,
@@ -220,28 +162,40 @@ def main() -> None:
     )
 
     bundle = load_tensor_bundle(args.bundle_path)
-    W = bundle["W"].to(dtype=torch.float32)
-    X = bundle["X"].to(dtype=torch.float32)
+    W = bundle["W"].to(device=pruning_device, dtype=torch.float32)
+    X = bundle["X"].to(device=pruning_device, dtype=torch.float32)
     bundle_metadata = bundle.get("metadata", {})
 
-    prune_info = _build_prune_result(args, W, X)
+    prune_info = build_prune_result(
+        method=args.method,
+        target_sparsity=args.target_sparsity,
+        W=W,
+        X=X,
+        num_iters=args.iters,
+        search_steps=args.search_steps,
+        sparsity_tol=args.sparsity_tol,
+        show_progress=not args.disable_progress,
+        progress_desc=f"{args.method} lambda search",
+        settings=method_settings(
+            args.method,
+            default_r_min=args.r_min,
+            default_r_max=args.r_max,
+            default_momentum_beta=args.momentum_beta,
+        ),
+    )
     prune_result = prune_info["prune_result"]
 
-    corpus = load_calibration_text_corpus(
-        args.calibration_source,
+    finetune_texts, eval_texts, corpus_metadata = select_finetune_and_eval_texts(
+        source=args.calibration_source,
         dataset_name=args.calibration_dataset_name,
         dataset_config=args.calibration_dataset_config,
         split=args.calibration_split,
         text_key=args.calibration_text_key,
-        max_texts=args.finetune_texts + args.eval_texts,
+        finetune_texts=args.finetune_texts,
+        eval_texts=args.eval_texts,
         min_chars=args.calibration_min_chars,
         seed=args.seed,
         shuffle=not args.disable_calibration_shuffle,
-    )
-    finetune_texts, eval_texts = _split_texts(
-        corpus.texts,
-        finetune_count=args.finetune_texts,
-        eval_count=args.eval_texts,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -254,6 +208,7 @@ def main() -> None:
 
     target_module = resolve_module(pruned_model, args.layer_name)
     apply_weight_matrix(target_module, prune_result.U)
+    parameter_masks = build_module_weight_masks([target_module])
     _freeze_except_module(pruned_model, target_module)
 
     before_metrics = evaluate_perplexity_on_texts(
@@ -288,6 +243,7 @@ def main() -> None:
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         grad_clip=args.grad_clip,
+        parameter_masks=parameter_masks,
         show_progress=not args.disable_progress,
     )
 
@@ -320,12 +276,13 @@ def main() -> None:
             "learning_rate": float(args.learning_rate),
             "weight_decay": float(args.weight_decay),
             "grad_clip": float(args.grad_clip),
+            "preserve_pruning_mask": True,
             "finetune_texts": len(finetune_texts),
             "eval_texts": len(eval_texts),
             "seed": int(args.seed),
         },
         "bundle_metadata": bundle_metadata,
-        "corpus_metadata": corpus.metadata,
+        "corpus_metadata": corpus_metadata,
         "pruning": {
             "selected_lambda": prune_info["selected_lambda"],
             "search": prune_info["search"],

@@ -110,6 +110,7 @@ def main() -> None:
     layer_name = args.layer_name or choose_default_prunable_module(model)
     module = resolve_module(model, layer_name)
     hook = ActivationHook(module=module, move_to_cpu=True, flatten_batch=True)
+    attention_masks: list[torch.Tensor] = []
 
     corpus = load_calibration_text_corpus(
         source=args.calibration_source,
@@ -138,12 +139,19 @@ def main() -> None:
                 truncation=True,
                 max_length=args.max_length,
             )
+            batch_attention_mask = encoded.get("attention_mask")
+            if batch_attention_mask is None:
+                batch_attention_mask = torch.ones_like(encoded["input_ids"])
+            attention_masks.append(batch_attention_mask.detach().cpu())
             encoded = {key: value.to(args.device) for key, value in encoded.items()}
             model(**encoded)
 
-    X = hook.stacked_inputs().to(dtype=torch.float32)
+    X = hook.stacked_inputs(attention_masks=attention_masks).to(dtype=torch.float32)
     W = extract_weight_matrix(module)
     hook.close()
+
+    valid_token_count = int(sum(mask.sum().item() for mask in attention_masks))
+    padded_token_count = int(sum(mask.numel() - mask.sum().item() for mask in attention_masks))
 
     bundle = {
         "W": W,
@@ -157,6 +165,13 @@ def main() -> None:
             "output_dim": int(W.shape[0]),
             "num_samples": int(X.shape[1]),
             "num_texts": len(texts),
+            "num_valid_tokens": valid_token_count,
+            "num_padding_tokens_excluded": padded_token_count,
+            "padding_fraction_excluded": (
+                float(padded_token_count / (valid_token_count + padded_token_count))
+                if (valid_token_count + padded_token_count) > 0
+                else 0.0
+            ),
             "max_length": args.max_length,
             "batch_size": args.batch_size,
             **corpus.metadata,
@@ -170,6 +185,8 @@ def main() -> None:
     print(f"module_type: {module.__class__.__name__}")
     print(f"W shape: {tuple(W.shape)}")
     print(f"X shape: {tuple(X.shape)}")
+    print(f"valid_tokens: {valid_token_count}")
+    print(f"padding_tokens_excluded: {padded_token_count}")
     print(f"calibration_source: {corpus.metadata.get('calibration_source')}")
     if "dataset_name" in corpus.metadata:
         print(f"dataset_name: {corpus.metadata.get('dataset_name')}")

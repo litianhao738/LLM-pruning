@@ -20,18 +20,54 @@ class ActivationHook:
         if not inputs:
             return
         tensor = inputs[0].detach()
-        if self.flatten_batch and tensor.ndim > 2:
-            tensor = tensor.reshape(-1, tensor.shape[-1])
-        if tensor.ndim == 1:
-            tensor = tensor.unsqueeze(0)
         if self.move_to_cpu:
-            tensor = tensor.cpu()
+            tensor = tensor.to(device="cpu", non_blocking=True)
         self._inputs.append(tensor)
 
-    def stacked_inputs(self) -> torch.Tensor:
+    def _prepare_batch(
+        self,
+        tensor: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if attention_mask is not None:
+            mask = attention_mask.detach()
+            if self.move_to_cpu:
+                mask = mask.cpu()
+            mask = mask.to(device=tensor.device, dtype=torch.bool)
+
+            if tensor.ndim == 1:
+                tensor = tensor.unsqueeze(0)
+
+            expected_shape = tuple(tensor.shape[:-1]) if tensor.ndim > 1 else tuple(tensor.shape)
+            if tuple(mask.shape) != expected_shape:
+                raise ValueError(
+                    "Attention mask shape mismatch for captured activations: "
+                    f"expected {expected_shape}, got {tuple(mask.shape)}"
+                )
+            tensor = tensor[mask]
+        elif self.flatten_batch and tensor.ndim > 2:
+            tensor = tensor.reshape(-1, tensor.shape[-1])
+
+        if tensor.ndim == 1:
+            tensor = tensor.unsqueeze(0)
+        return tensor
+
+    def stacked_inputs(self, attention_masks: list[torch.Tensor] | None = None) -> torch.Tensor:
         if not self._inputs:
             raise ValueError("No activations have been captured yet")
-        stacked = torch.cat(self._inputs, dim=0)
+        if attention_masks is not None and len(attention_masks) != len(self._inputs):
+            raise ValueError(
+                "Number of attention masks must match the number of captured activation batches"
+            )
+
+        batches = [
+            self._prepare_batch(
+                tensor,
+                None if attention_masks is None else attention_masks[index],
+            )
+            for index, tensor in enumerate(self._inputs)
+        ]
+        stacked = torch.cat(batches, dim=0)
         return stacked.transpose(0, 1).contiguous()
 
     def clear(self) -> None:
@@ -76,15 +112,22 @@ def choose_default_prunable_module(model: nn.Module) -> str:
     return candidates[0]
 
 
-def extract_weight_matrix(module: nn.Module) -> torch.Tensor:
+def extract_weight_matrix(
+    module: nn.Module,
+    *,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    target_device = torch.device(device) if device is not None else torch.device("cpu")
+
     if isinstance(module, nn.Linear):
-        return module.weight.detach().cpu().to(dtype=torch.float32)
+        return module.weight.detach().to(device=target_device, dtype=dtype)
 
     if module.__class__.__name__ == "Conv1D" and hasattr(module, "weight"):
-        weight = module.weight.detach().cpu()
+        weight = module.weight.detach().to(device=target_device)
         if weight.ndim != 2:
             raise ValueError("Conv1D weight must be rank-2")
-        return weight.transpose(0, 1).contiguous().to(dtype=torch.float32)
+        return weight.transpose(0, 1).contiguous().to(dtype=dtype)
 
     raise TypeError(f"Unsupported module type for pruning: {type(module).__name__}")
 

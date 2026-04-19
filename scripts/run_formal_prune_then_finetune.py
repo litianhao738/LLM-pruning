@@ -7,7 +7,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from configs.formal_prune_then_finetune import (
+from configs.formal_runs import (
+    FORMAL_FT_ADAPTIVE_R_MAX,
+    FORMAL_FT_ADAPTIVE_R_MIN,
     FORMAL_FT_BATCH_SIZE,
     FORMAL_FT_BUNDLE_PATH,
     FORMAL_FT_CALIBRATION_DATASET_CONFIG,
@@ -20,15 +22,17 @@ from configs.formal_prune_then_finetune import (
     FORMAL_FT_EVAL_TEXTS,
     FORMAL_FT_FINETUNE_STEPS,
     FORMAL_FT_FINETUNE_TEXTS,
+    FORMAL_FT_GM_MOMENTUM_BETA,
+    FORMAL_FT_GM_R_MAX,
+    FORMAL_FT_GM_R_MIN,
     FORMAL_FT_GRAD_CLIP,
     FORMAL_FT_ITERS,
     FORMAL_FT_LAYER_NAME,
     FORMAL_FT_LEARNING_RATE,
     FORMAL_FT_MAX_LENGTH,
-    FORMAL_FT_METHOD,
+    FORMAL_FT_METHODS,
     FORMAL_FT_MODEL_NAME,
-    FORMAL_FT_MOMENTUM_BETA,
-    FORMAL_FT_OUTPUT_PATH,
+    FORMAL_FT_OUTPUT_DIR,
     FORMAL_FT_R_MAX,
     FORMAL_FT_R_MIN,
     FORMAL_FT_SEARCH_STEPS,
@@ -41,14 +45,18 @@ from configs.formal_prune_then_finetune import (
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the formal prune-then-finetune mainline on distilgpt2 + h.0.attn.c_proj."
+        description=(
+            "Run the formal single-layer prune-then-fine-tune comparison on "
+            "distilgpt2 + h.0.attn.c_proj."
+        )
     )
     parser.add_argument("--bundle-path", type=str, default=str(FORMAL_FT_BUNDLE_PATH))
     parser.add_argument("--device", type=str, default=FORMAL_FT_DEVICE)
+    parser.add_argument("--methods", type=str, default=FORMAL_FT_METHODS)
     parser.add_argument("--finetune-steps", type=int, default=FORMAL_FT_FINETUNE_STEPS)
     parser.add_argument("--finetune-texts", type=int, default=FORMAL_FT_FINETUNE_TEXTS)
     parser.add_argument("--eval-texts", type=int, default=FORMAL_FT_EVAL_TEXTS)
-    parser.add_argument("--output-path", type=str, default=str(FORMAL_FT_OUTPUT_PATH))
+    parser.add_argument("--output-dir", type=str, default=str(FORMAL_FT_OUTPUT_DIR))
     parser.add_argument("--disable-progress", action="store_true")
     return parser
 
@@ -64,15 +72,15 @@ def main() -> None:
 
     command = [
         python_executable,
-        "scripts/run_prune_then_finetune.py",
+        "scripts/run_single_layer_prune_then_finetune_compare.py",
         "--model-name",
         FORMAL_FT_MODEL_NAME,
         "--layer-name",
         FORMAL_FT_LAYER_NAME,
         "--bundle-path",
         args.bundle_path,
-        "--method",
-        FORMAL_FT_METHOD,
+        "--methods",
+        args.methods,
         "--target-sparsity",
         str(FORMAL_FT_TARGET_SPARSITY),
         "--iters",
@@ -85,8 +93,16 @@ def main() -> None:
         str(FORMAL_FT_R_MIN),
         "--r-max",
         str(FORMAL_FT_R_MAX),
-        "--momentum-beta",
-        str(FORMAL_FT_MOMENTUM_BETA),
+        "--adaptive-r-min",
+        str(FORMAL_FT_ADAPTIVE_R_MIN),
+        "--adaptive-r-max",
+        str(FORMAL_FT_ADAPTIVE_R_MAX),
+        "--gradient-r-min",
+        str(FORMAL_FT_GM_R_MIN),
+        "--gradient-r-max",
+        str(FORMAL_FT_GM_R_MAX),
+        "--gradient-momentum-beta",
+        str(FORMAL_FT_GM_MOMENTUM_BETA),
         "--device",
         args.device,
         "--max-length",
@@ -107,8 +123,8 @@ def main() -> None:
         str(args.eval_texts),
         "--seed",
         str(FORMAL_FT_SEED),
-        "--output-path",
-        args.output_path,
+        "--output-dir",
+        args.output_dir,
         "--calibration-source",
         FORMAL_FT_CALIBRATION_SOURCE,
         "--calibration-dataset-name",

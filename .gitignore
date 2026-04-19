@@ -2,6 +2,9 @@
 .idea/
 __pycache__/
 artifacts/
+artifacts.zip
+*.stdout.log
+*.stderr.log
 *.pyc
 *.pyo
 *.pyd

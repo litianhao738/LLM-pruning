@@ -48,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--r-max", type=float, default=1.5)
     parser.add_argument("--include-gradient-momentum", action="store_true")
     parser.add_argument("--momentum-beta", type=float, default=1.0)
+    parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument(
         "--disable-progress",
         action="store_true",
@@ -92,20 +93,22 @@ def _print_block(title: str, metrics: dict[str, object]) -> None:
 
 
 def _load_problem_data(args: argparse.Namespace) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    device = torch.device(args.device)
+    pruning_device = device if device.type == "cuda" else torch.device("cpu")
     if args.bundle_path:
         bundle = load_tensor_bundle(args.bundle_path)
-        W = bundle["W"].to(dtype=torch.float32)
-        X = bundle["X"].to(dtype=torch.float32)
+        W = bundle["W"].to(device=pruning_device, dtype=torch.float32)
+        X = bundle["X"].to(device=pruning_device, dtype=torch.float32)
         metadata = bundle.get("metadata", {})
     else:
         torch.manual_seed(args.seed)
-        W = torch.randn(args.rows, args.cols)
+        W = torch.randn(args.rows, args.cols, device=pruning_device)
         calibration = make_synthetic_calibration(
             num_features=args.cols,
             num_samples=args.samples,
             seed=args.seed,
         )
-        X = calibration.activations
+        X = calibration.activations.to(device=pruning_device)
         metadata = calibration.metadata
     return W, X, metadata
 
@@ -206,6 +209,7 @@ def main() -> None:
                 {
                     "r_min": args.r_min,
                     "r_max": args.r_max,
+                    "target_sparsity": target_sparsity,
                 },
             ),
         ]

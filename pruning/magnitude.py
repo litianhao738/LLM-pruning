@@ -1,6 +1,7 @@
 import torch
 
 from pruning.base import BasePruner, PruneResult
+from utils.math_utils import l1_norm
 from utils.sparsity import actual_sparsity, count_nonzero, count_zero
 
 
@@ -38,6 +39,8 @@ class MagnitudePruner(BasePruner):
             raise TypeError("X must be a torch.Tensor")
         if W.numel() == 0:
             raise ValueError("W must be non-empty")
+        if X.numel() == 0:
+            raise ValueError("X must be non-empty")
 
         num_total = W.numel()
         num_keep = int(round(num_total * (1.0 - self.sparsity)))
@@ -65,6 +68,15 @@ class MagnitudePruner(BasePruner):
             "num_total": int(num_total),
             "num_nonzero": count_nonzero(U),
             "num_zero": count_zero(U),
+            "num_iters": 0,
+            "reconstruction_error": _reconstruction_error(W=W, U=U, X=X),
+            "l1_norm": l1_norm(U),
+            "objective": None,
         }
 
         return PruneResult(U=U, stats=stats)
+
+
+def _reconstruction_error(W: torch.Tensor, U: torch.Tensor, X: torch.Tensor) -> float:
+    residual = (U - W) @ X
+    return float(0.5 * residual.pow(2).sum().item())

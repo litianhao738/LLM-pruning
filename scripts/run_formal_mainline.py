@@ -8,10 +8,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from configs.formal_mainline import (
+    FORMAL_ADAPTIVE_R_MAX,
+    FORMAL_ADAPTIVE_R_MIN,
     FORMAL_BUNDLE_PATH,
     FORMAL_CALIBRATION_BATCH_SIZE,
     FORMAL_CALIBRATION_DATASET_CONFIG,
     FORMAL_CALIBRATION_DATASET_NAME,
+    FORMAL_EVAL_START_INDEX,
+    FORMAL_EVAL_TEXTS,
     FORMAL_CALIBRATION_MAX_LENGTH,
     FORMAL_CALIBRATION_MAX_TEXTS,
     FORMAL_CALIBRATION_MIN_CHARS,
@@ -19,9 +23,12 @@ from configs.formal_mainline import (
     FORMAL_CALIBRATION_SOURCE,
     FORMAL_CALIBRATION_SPLIT,
     FORMAL_CALIBRATION_TEXT_KEY,
-    FORMAL_INCLUDE_GRADIENT_MOMENTUM,
     FORMAL_ITERS,
+    FORMAL_GM_MOMENTUM_BETA,
+    FORMAL_GM_R_MAX,
+    FORMAL_GM_R_MIN,
     FORMAL_LAYER_NAME,
+    FORMAL_METHODS,
     FORMAL_MODEL_NAME,
     FORMAL_MOMENTUM_BETA,
     FORMAL_OUTPUT_DIR,
@@ -29,13 +36,16 @@ from configs.formal_mainline import (
     FORMAL_R_MIN,
     FORMAL_SEARCH_STEPS,
     FORMAL_SPARSITY_TOL,
-    FORMAL_TARGET_SPARSITY_GRID_ARG,
+    FORMAL_TARGET_SPARSITY,
 )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the locked formal experiment mainline: distilgpt2 + h.0.attn.c_proj + WikiText-103 + magnitude/FISTA/adaptive FISTA, with optional gradient-momentum extension enabled by config."
+        description=(
+            "Run the current single-layer formal mainline: nopad activation collection "
+            "plus perplexity-first comparison on distilgpt2 transformer.h.0.attn.c_proj."
+        )
     )
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--max-texts", type=int, default=FORMAL_CALIBRATION_MAX_TEXTS)
@@ -44,11 +54,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--iters", type=int, default=FORMAL_ITERS)
     parser.add_argument("--search-steps", type=int, default=FORMAL_SEARCH_STEPS)
     parser.add_argument("--sparsity-tol", type=float, default=FORMAL_SPARSITY_TOL)
-    parser.add_argument("--target-sparsity-grid", type=str, default=FORMAL_TARGET_SPARSITY_GRID_ARG)
+    parser.add_argument("--methods", type=str, default=FORMAL_METHODS)
+    parser.add_argument("--target-sparsity", type=float, default=FORMAL_TARGET_SPARSITY)
+    parser.add_argument("--eval-start-index", type=int, default=FORMAL_EVAL_START_INDEX)
+    parser.add_argument("--eval-texts", type=int, default=FORMAL_EVAL_TEXTS)
     parser.add_argument("--bundle-path", type=str, default=str(FORMAL_BUNDLE_PATH))
     parser.add_argument("--output-dir", type=str, default=str(FORMAL_OUTPUT_DIR))
     parser.add_argument("--skip-collect", action="store_true")
     parser.add_argument("--force-collect", action="store_true")
+    parser.add_argument("--disable-progress", action="store_true")
     return parser
 
 
@@ -97,17 +111,25 @@ def main() -> None:
             "--calibration-seed",
             str(FORMAL_CALIBRATION_SEED),
         ]
+        if args.disable_progress:
+            collect_command.append("--disable-progress")
         _run_command(collect_command)
     else:
         print(f"Using existing bundle: {bundle_path}")
 
     compare_command = [
         python_executable,
-        "scripts/run_target_sparsity_compare.py",
+        "scripts/run_single_layer_perplexity_compare.py",
+        "--model-name",
+        FORMAL_MODEL_NAME,
+        "--layer-name",
+        FORMAL_LAYER_NAME,
         "--bundle-path",
         str(bundle_path),
-        "--target-sparsity-grid",
-        args.target_sparsity_grid,
+        "--methods",
+        args.methods,
+        "--target-sparsity",
+        str(args.target_sparsity),
         "--iters",
         str(args.iters),
         "--search-steps",
@@ -118,17 +140,45 @@ def main() -> None:
         str(FORMAL_R_MIN),
         "--r-max",
         str(FORMAL_R_MAX),
+        "--momentum-beta",
+        str(FORMAL_MOMENTUM_BETA),
+        "--adaptive-r-min",
+        str(FORMAL_ADAPTIVE_R_MIN),
+        "--adaptive-r-max",
+        str(FORMAL_ADAPTIVE_R_MAX),
+        "--gradient-r-min",
+        str(FORMAL_GM_R_MIN),
+        "--gradient-r-max",
+        str(FORMAL_GM_R_MAX),
+        "--gradient-momentum-beta",
+        str(FORMAL_GM_MOMENTUM_BETA),
+        "--device",
+        args.device,
+        "--max-length",
+        str(args.max_length),
+        "--batch-size",
+        str(args.batch_size),
+        "--eval-start-index",
+        str(args.eval_start_index),
+        "--eval-texts",
+        str(args.eval_texts),
         "--output-dir",
         args.output_dir,
+        "--calibration-source",
+        FORMAL_CALIBRATION_SOURCE,
+        "--calibration-dataset-name",
+        FORMAL_CALIBRATION_DATASET_NAME,
+        "--calibration-dataset-config",
+        FORMAL_CALIBRATION_DATASET_CONFIG,
+        "--calibration-split",
+        FORMAL_CALIBRATION_SPLIT,
+        "--calibration-text-key",
+        FORMAL_CALIBRATION_TEXT_KEY,
+        "--calibration-min-chars",
+        str(FORMAL_CALIBRATION_MIN_CHARS),
     ]
-    if FORMAL_INCLUDE_GRADIENT_MOMENTUM:
-        compare_command.extend(
-            [
-                "--include-gradient-momentum",
-                "--momentum-beta",
-                str(FORMAL_MOMENTUM_BETA),
-            ]
-        )
+    if args.disable_progress:
+        compare_command.append("--disable-progress")
     _run_command(compare_command)
 
 

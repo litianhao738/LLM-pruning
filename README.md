@@ -1,356 +1,218 @@
-# Adaptive Threshold FISTA for LLM Pruning
+# FISTA-Based Layer-Wise Pruning for LLMs
 
-## Overview
+## Quick Start
 
-This repository implements an **LLM layer-wise pruning** experiment framework.
-The current codebase focuses on real-layer activation collection from `distilgpt2`,
-single-layer pruning, post-pruning fine-tuning, and sequential multi-layer pruning.
-
-Install the required packages with:
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
-The project is organized into three levels:
 
-1. Mainline
-   - `magnitude`
-   - `fista`
-2. Strong extensions
-   - `adaptive_fista`
-   - `gradient_momentum_fista`
-3. Bonus
-   - `prune-then-fine-tune`
-   - `sequential multi-layer pruning`
+Collect the corrected `nopad` activation bundle:
 
----
+```bash
+python scripts/collect_activations.py --model-name distilgpt2 --layer-name transformer.h.0.attn.c_proj --device cuda --calibration-source wikitext103 --calibration-dataset-name Salesforce/wikitext --calibration-dataset-config wikitext-103-raw-v1 --calibration-split train --calibration-text-key text --calibration-max-texts 128 --calibration-min-chars 20 --calibration-seed 7 --max-length 64 --batch-size 4 --output-path artifacts/distilgpt2_h0_attn_cproj_wikitext128_bundle_nopad.pt
+```
 
-## 1. Code Modules
+Run the current 4-method single-layer comparison:
 
-### 1.1 Mainline
+```bash
+python scripts/run_single_layer_perplexity_compare.py --model-name distilgpt2 --layer-name transformer.h.0.attn.c_proj --bundle-path artifacts/distilgpt2_h0_attn_cproj_wikitext128_bundle_nopad.pt --methods magnitude,fista,adaptive_fista,gradient_momentum_fista --target-sparsity 0.5 --iters 1000 --search-steps 12 --sparsity-tol 0.01 --adaptive-r-min 0.9 --adaptive-r-max 1.1 --gradient-r-min 0.9 --gradient-r-max 1.1 --gradient-momentum-beta 0.001 --device cuda --max-length 64 --batch-size 4 --eval-start-index 32 --eval-texts 32 --output-dir artifacts/single_layer_mainline
+```
 
-The mainline contains the two baseline methods:
+Run single-layer pruning followed by masked fine-tuning:
 
-- `magnitude`
-  - heuristic pruning baseline
-- `fista`
-  - optimization-based pruning baseline
+```bash
+python scripts/run_single_layer_prune_then_finetune_compare.py --model-name distilgpt2 --layer-name transformer.h.0.attn.c_proj --bundle-path artifacts/distilgpt2_h0_attn_cproj_wikitext128_bundle_nopad.pt --methods magnitude,fista,adaptive_fista,gradient_momentum_fista --target-sparsity 0.5 --iters 1000 --search-steps 12 --sparsity-tol 0.01 --r-min 0.1 --r-max 1.5 --adaptive-r-min 0.9 --adaptive-r-max 1.1 --gradient-r-min 0.9 --gradient-r-max 1.1 --gradient-momentum-beta 0.001 --device cuda --max-length 64 --batch-size 4 --finetune-steps 20 --learning-rate 1e-4 --weight-decay 0.0 --grad-clip 1.0 --finetune-texts 32 --eval-texts 32 --seed 7 --output-dir artifacts/single_layer_finetune_mainline
+```
 
-Mainline-related files:
+Run the current 4-method multi-layer comparison:
 
-- `scripts/collect_activations.py`
-- `models/hooks.py`
-- `data/calibration.py`
-- `pruning/magnitude.py`
-- `pruning/fista.py`
-- `pruning/search.py`
-- `scripts/run_target_sparsity_compare.py`
-- `scripts/run_formal_mainline.py`
-- `main.py`
+```bash
+python scripts/run_formal_multilayer_mainline.py --methods magnitude,fista,adaptive_fista,gradient_momentum_fista --device cuda --output-dir artifacts/multilayer_mainline
+```
 
-### 1.2 Strong Extensions
+Run multi-layer pruning followed by masked fine-tuning:
 
-The strong extensions are:
+```bash
+python scripts/run_formal_multilayer_mainline.py --methods magnitude,fista,adaptive_fista,gradient_momentum_fista --device cuda --finetune-steps 20 --output-dir artifacts/multilayer_finetune_mainline
+```
 
-- `adaptive_fista`
-  - Adaptive-Threshold FISTA
-- `gradient_momentum_fista`
-  - Gradient-Aware Adaptive Momentum FISTA
-
-Extension-related files:
-
-- `pruning/adaptive_fista.py`
-- `pruning/gradient_momentum_fista.py`
-- `pruning/search.py`
-- `scripts/run_target_sparsity_compare.py`
-
-### 1.3 Bonus
-
-The current bonus modules are:
-
-- `prune-then-fine-tune`
-- `sequential multi-layer pruning`
-
-Bonus-related files:
-
-- `scripts/run_prune_then_finetune.py`
-- `scripts/run_formal_prune_then_finetune.py`
-- `configs/formal_prune_then_finetune.py`
-- `eval/perplexity.py`
-- `scripts/run_multilayer_pruning.py`
-- `scripts/run_formal_multilayer_gradient_momentum.py`
-- `scripts/run_formal_multilayer_magnitude.py`
-- `configs/formal_multilayer_gradient_momentum.py`
-- `configs/formal_multilayer_magnitude.py`
-
----
-
-## 2. Current Default Settings
-
-The current locked experiment setup is:
-
-- model: `distilgpt2`
-- main layer: `transformer.h.0.attn.c_proj`
-- calibration dataset: `Salesforce/wikitext`
-- dataset config: `wikitext-103-raw-v1`
-- calibration texts: `128`
-- target sparsity grid: `0.3, 0.5, 0.7`
-- iterations: `100`
-- `r_min = 0.1`
-- `r_max = 1.5`
-- `momentum_beta = 0.5`
-
-Default bundle path:
-
-- `artifacts\distilgpt2_h0_attn_cproj_wikitext128_bundle.pt`
-
-Important note:
-
-- `python main.py` currently runs:
-  - `magnitude`
-  - `fista`
-  - `adaptive_fista`
-  - `gradient_momentum_fista`
-- In other words, the current formal mainline entrypoint already includes the gradient-momentum extension.
-
----
-
-## 3. Run Commands
-
-This section is organized by experiment module.
-
-### 3.1 Mainline
-
-Simplest entrypoint:
+Minimal convenience wrappers:
 
 ```bash
 python main.py
+python scripts/run_formal_prune_then_finetune.py --device cuda
+python scripts/run_formal_multilayer_mainline.py --device cuda
 ```
 
-Equivalent formal entrypoint:
+## What This Project Does
 
-```bash
-python scripts\run_formal_mainline.py
-```
+This repository studies structured comparisons between four layer-wise pruning methods on `distilgpt2`:
 
-Manual two-step run:
+- `magnitude`
+- `fista`
+- `adaptive_fista`
+- `gradient_momentum_fista`
 
-First collect the bundle:
+The workflow is:
 
-```bash
-python scripts\collect_activations.py --model-name distilgpt2 --layer-name transformer.h.0.attn.c_proj --calibration-source wikitext103 --calibration-max-texts 128 --batch-size 4 --output-path artifacts\distilgpt2_h0_attn_cproj_wikitext128_bundle.pt
-```
+1. Collect real activations from a target layer.
+2. Prune weights using one method at a matched target sparsity.
+3. Evaluate with perplexity and reconstruction error.
+4. Optionally fine-tune while **preserving the pruning mask**.
+5. Repeat the same process for sequential multi-layer pruning.
 
-Then run the single-layer comparison:
+The project uses a corrected `nopad` activation pipeline, so padding tokens are excluded from the activation matrix `X`.
 
-```bash
-python scripts\run_target_sparsity_compare.py --bundle-path artifacts\distilgpt2_h0_attn_cproj_wikitext128_bundle.pt --target-sparsity-grid 0.3,0.5,0.7 --iters 100 --r-min 0.1 --r-max 1.5 --include-gradient-momentum --momentum-beta 0.5 --output-dir artifacts\distilgpt2_h0_attn_cproj_wikitext128_i100_r01_15_gm05
-```
+## Current Mainline
 
-### 3.2 Single-Layer Pruning Followed by Fine-Tuning
+The current mainline is:
 
-`gradient_momentum_fista`:
+- model: `distilgpt2`
+- single-layer target: `transformer.h.0.attn.c_proj`
+- multi-layer targets:
+  - `transformer.h.0.attn.c_proj`
+  - `transformer.h.1.attn.c_proj`
+- dataset: `Salesforce/wikitext`, config `wikitext-103-raw-v1`
+- calibration texts: `128`
+- target sparsity: `0.5`
+- iterations: `1000`
+- search steps: `12`
+- sparsity tolerance: `0.01`
+- fine-tune steps: `20`
+- fine-tune mask policy: **keep pruned weights at zero**
 
-```bash
-python scripts\run_prune_then_finetune.py --model-name distilgpt2 --layer-name transformer.h.0.attn.c_proj --bundle-path artifacts\distilgpt2_h0_attn_cproj_wikitext128_bundle.pt --method gradient_momentum_fista --target-sparsity 0.5 --iters 100 --r-min 0.1 --r-max 1.5 --momentum-beta 0.5 --finetune-steps 20 --finetune-texts 32 --eval-texts 32 --output-path artifacts\formal_prune_then_finetune_gm_s050.json
-```
+The default activation bundle is:
 
-`magnitude`:
+- `artifacts/distilgpt2_h0_attn_cproj_wikitext128_bundle_nopad.pt`
 
-```bash
-python scripts\run_prune_then_finetune.py --model-name distilgpt2 --layer-name transformer.h.0.attn.c_proj --bundle-path artifacts\distilgpt2_h0_attn_cproj_wikitext128_bundle.pt --method magnitude --target-sparsity 0.5 --finetune-steps 20 --finetune-texts 32 --eval-texts 32 --output-path artifacts\formal_prune_then_finetune_magnitude_s050.json
-```
+## Where the Parameters Come From
 
-If you want the default formal single-layer fine-tuning run:
+The parameters are not arbitrary. They come from three sources.
 
-```bash
-python scripts\run_formal_prune_then_finetune.py
-```
+### 1. Fixed experiment setup
 
-### 3.3 Multi-Layer Pruning
+These are chosen to define one stable evaluation line:
 
-The current default multi-layer setup uses:
+- `distilgpt2`
+- `wikitext-103-raw-v1`
+- target sparsity `0.5`
+- `128` calibration texts
+- `32` evaluation texts
+- `1000` pruning iterations
 
-- `transformer.h.0.attn.c_proj`
-- `transformer.h.1.attn.c_proj`
+These defaults live in:
 
-Formal `gradient_momentum_fista` entrypoint:
+- [configs/formal_runs.py](./configs/formal_runs.py)
 
-```bash
-python scripts\run_formal_multilayer_gradient_momentum.py
-```
+### 2. Automatically searched parameters
 
-Formal `magnitude` entrypoint:
+For `fista`, `adaptive_fista`, and `gradient_momentum_fista`, the regularization weight `lambda` is **not fixed by hand**. It is selected automatically by binary/bracketed search to match the target sparsity as closely as possible.
 
-```bash
-python scripts\run_formal_multilayer_magnitude.py
-```
+This search logic lives in:
 
-Generic `gradient_momentum_fista` entrypoint:
+- [pruning/search.py](./pruning/search.py)
 
-```bash
-python scripts\run_multilayer_pruning.py --model-name distilgpt2 --layer-names transformer.h.0.attn.c_proj,transformer.h.1.attn.c_proj --method gradient_momentum_fista --target-sparsity 0.5 --iters 100 --r-min 0.1 --r-max 1.5 --momentum-beta 0.5 --calibration-source wikitext103 --calibration-max-texts 128 --eval-texts 32 --output-dir artifacts\formal_multilayer_gradient_momentum_s050
-```
+### 3. Method-specific tuned parameters
 
-Generic `magnitude` entrypoint:
+Some methods need extra hyperparameters beyond `lambda`.
 
-```bash
-python scripts\run_multilayer_pruning.py --model-name distilgpt2 --layer-names transformer.h.0.attn.c_proj,transformer.h.1.attn.c_proj --method magnitude --target-sparsity 0.5 --calibration-source wikitext103 --calibration-max-texts 128 --eval-texts 32 --output-dir artifacts\formal_multilayer_magnitude_s050
-```
+Current tuned defaults:
 
-### 3.4 Multi-Layer Pruning Followed by Fine-Tuning
+- `adaptive_fista`
+  - `adaptive_r_min = 0.9`
+  - `adaptive_r_max = 1.1`
+- `gradient_momentum_fista`
+  - `gradient_r_min = 0.9`
+  - `gradient_r_max = 1.1`
+  - `gradient_momentum_beta = 0.001`
 
-Here, fine-tuning is applied only after all target layers have been pruned.
+These values were chosen from empirical comparisons in this repository. They are the current best-performing stable settings on the corrected `nopad` line.
 
-Formal `gradient_momentum_fista`:
+## Code Structure
 
-```bash
-python scripts\run_formal_multilayer_gradient_momentum.py --finetune-steps 20
-```
+The code is organized into a few small layers.
 
-Formal `magnitude`:
+### Config
 
-```bash
-python scripts\run_formal_multilayer_magnitude.py --finetune-steps 20
-```
+- [configs/formal_runs.py](./configs/formal_runs.py)
+  - central defaults for the current mainline
+- [configs/formal_mainline.py](./configs/formal_mainline.py)
+  - thin compatibility export
 
-Generic `gradient_momentum_fista`:
+### Data and model plumbing
 
-```bash
-python scripts\run_multilayer_pruning.py --model-name distilgpt2 --layer-names transformer.h.0.attn.c_proj,transformer.h.1.attn.c_proj --method gradient_momentum_fista --target-sparsity 0.5 --iters 100 --r-min 0.1 --r-max 1.5 --momentum-beta 0.5 --calibration-source wikitext103 --calibration-max-texts 128 --finetune-steps 20 --finetune-texts 32 --learning-rate 1e-4 --weight-decay 0.0 --grad-clip 1.0 --eval-texts 32 --output-dir artifacts\formal_multilayer_gradient_momentum_s050_ft20
-```
+- [data/calibration.py](./data/calibration.py)
+  - loads calibration, fine-tune, and evaluation texts
+- [models/hooks.py](./models/hooks.py)
+  - collects activations and applies the `nopad` filtering fix
 
-Generic `magnitude`:
+### Pruning methods
 
-```bash
-python scripts\run_multilayer_pruning.py --model-name distilgpt2 --layer-names transformer.h.0.attn.c_proj,transformer.h.1.attn.c_proj --method magnitude --target-sparsity 0.5 --calibration-source wikitext103 --calibration-max-texts 128 --finetune-steps 20 --finetune-texts 32 --learning-rate 1e-4 --weight-decay 0.0 --grad-clip 1.0 --eval-texts 32 --output-dir artifacts\formal_multilayer_magnitude_s050_ft20
-```
+- [pruning/magnitude.py](./pruning/magnitude.py)
+- [pruning/fista.py](./pruning/fista.py)
+- [pruning/adaptive_fista.py](./pruning/adaptive_fista.py)
+- [pruning/gradient_momentum_fista.py](./pruning/gradient_momentum_fista.py)
+- [pruning/search.py](./pruning/search.py)
 
----
+### Shared utilities
 
-## 4. Output Files
+- [utils/single_layer_utils.py](./utils/single_layer_utils.py)
+  - shared method construction and lambda-search wiring
+- [utils/finetune_masks.py](./utils/finetune_masks.py)
+  - keeps pruned weights fixed at zero during fine-tuning
 
-### 4.1 Single-Layer Comparison
+### Main experiment scripts
 
-Typical outputs:
+- [scripts/collect_activations.py](./scripts/collect_activations.py)
+- [scripts/run_single_layer_perplexity_compare.py](./scripts/run_single_layer_perplexity_compare.py)
+- [scripts/run_single_layer_prune_then_finetune_compare.py](./scripts/run_single_layer_prune_then_finetune_compare.py)
+- [scripts/run_multilayer_pruning.py](./scripts/run_multilayer_pruning.py)
+- [scripts/run_formal_mainline.py](./scripts/run_formal_mainline.py)
+- [scripts/run_formal_prune_then_finetune.py](./scripts/run_formal_prune_then_finetune.py)
+- [scripts/run_formal_multilayer_mainline.py](./scripts/run_formal_multilayer_mainline.py)
 
-- `summary.csv`
-- `summary.json`
-- `histories.csv`
-- `histories.json`
-- `search_trace.csv`
-- `search_trace.json`
+## Main Outputs
 
-### 4.2 Single-Layer Pruning Followed by Fine-Tuning
+Typical output files are:
 
-Typical output:
+- single-layer no fine-tuning
+  - `summary.csv`
+  - `report.json`
+  - `search_trace.csv`
+- single-layer fine-tuning
+  - `summary.csv`
+  - `report.json`
+  - `search_trace.csv`
+  - `finetune_history.csv`
+- multi-layer
+  - `summary.csv`
+  - per-method `layer_summary.csv`
+  - per-method `model_eval.csv`
+  - per-method `report.json`
+  - optional `finetune_history.csv`
 
-- `formal_prune_then_finetune_*.json`
-
-This JSON usually contains:
-
-- `before_pruning`
-- `after_pruning`
-- `after_finetuning`
-- `average_nll`
-- `perplexity`
-- `finetune_history`
-
-### 4.3 Multi-Layer Pruning / Multi-Layer Pruning Followed by Fine-Tuning
-
-Typical outputs:
-
-- `layer_summary.csv`
-- `model_eval.csv`
-- `histories.csv`
-- `search_summary.csv`
-- `report.json`
-
-If post-pruning fine-tuning is enabled, there is one additional file:
-
-- `finetune_history.csv`
-
----
-
-## 5. How To Read the Metrics
-
-### 5.1 Single-Layer Pruning Metrics
+The most important metrics are:
 
 - `actual_sparsity`
-  - the actual sparsity level of the pruned weights
 - `target_gap`
-  - the difference between actual sparsity and requested sparsity; smaller is better
+- `after_pruning_perplexity`
+- `after_finetuning_perplexity`
 - `reconstruction_error`
-  - layer reconstruction error; smaller is better
-- `best_lambda`
-  - the regularization strength selected by automatic search
 
-### 5.2 Fine-Tuning Metrics
+## Notes
 
-- `average_nll`
-  - average negative log-likelihood; smaller is better
-- `perplexity`
-  - smaller is better
+- Fine-tuning now preserves the pruning mask. Pruned weights are kept at zero.
+- `scripts/run_target_sparsity_compare.py` is still available, but it is now a legacy/diagnostic script rather than the main entry point.
+- `scripts/run_formal_multilayer_magnitude.py` and `scripts/run_formal_multilayer_gradient_momentum.py` are compatibility wrappers. The unified multi-layer entry point is `scripts/run_formal_multilayer_mainline.py`.
 
-### 5.3 How To Read the Multi-Layer Pipeline
+## Related Files
 
-In `model_eval.csv`, focus on:
+For a short project snapshot, see:
 
-- `before_pruning`
-- `after_layer`
-- `after_finetuning`
+- [PROJECT_STATUS.md](./PROJECT_STATUS.md)
 
-A reasonable trend is:
+For a code map, see:
 
-1. performance drops slightly after pruning one layer
-2. it drops further after pruning another layer
-3. it recovers after fine-tuning
-
----
-
-## 6. Parameter Sources
-
-The parameters in this repository are not arbitrary. They come from four main sources.
-
-### 6.1 Model and Data Sources
-
-- `model = distilgpt2`
-- `dataset = Salesforce/wikitext`
-- `dataset_config = wikitext-103-raw-v1`
-- `layer = transformer.h.0.attn.c_proj`
-
-### 6.2 Experimentally Chosen Parameters
-
-- `target sparsity = 0.3, 0.5, 0.7`
-- `iters = 100`
-- `r_min = 0.1`
-- `r_max = 1.5`
-- `calibration_max_texts = 128`
-- `momentum_beta = 0.5`
-
-### 6.3 Automatically Chosen Parameters
-
-- `lambda`
-
-For each target sparsity, `lambda` is selected automatically rather than fixed by hand.
-
-### 6.4 Main Experimental Code Paths
-
-- `scripts/collect_activations.py`
-- `scripts/run_target_sparsity_compare.py`
-- `pruning/search.py`
-- `pruning/adaptive_fista.py`
-- `pruning/gradient_momentum_fista.py`
-- `scripts/run_prune_then_finetune.py`
-- `scripts/run_multilayer_pruning.py`
-
----
-
-## 7. Current Conclusions
-
-- In the single-layer setup, `magnitude` is still the strongest baseline
-- `adaptive_fista` mainly improves sparsity matching
-- `gradient_momentum_fista` is stronger than `fista` and `adaptive_fista`, but usually still does not beat `magnitude`
-- Single-layer prune-then-fine-tune is working as expected: performance drops first, then recovers
-- Sequential multi-layer pruning is working
-- Multi-layer pruning followed by fine-tuning is also working, and the recovery trend is reasonable
+- [docs/CODE_LAYOUT.md](./docs/CODE_LAYOUT.md)
