@@ -16,6 +16,7 @@ from models.hooks import apply_weight_matrix, resolve_module
 from utils.io_utils import load_tensor_bundle, save_csv_rows, save_json
 from utils.single_layer_utils import (
     build_prune_result,
+    calibration_skip_texts_from_bundle_metadata,
     save_prune_cache,
     method_settings,
     parse_methods,
@@ -90,6 +91,16 @@ def main() -> None:
     W = bundle["W"].to(device=pruning_device, dtype=torch.float64)
     X = bundle["X"].to(device=pruning_device, dtype=torch.float64)
     bundle_metadata = bundle.get("metadata", {})
+    calibration_skip_texts = calibration_skip_texts_from_bundle_metadata(
+        bundle_metadata=bundle_metadata,
+        source=args.calibration_source,
+        dataset_name=args.calibration_dataset_name,
+        dataset_config=args.calibration_dataset_config,
+        split=args.calibration_split,
+        text_key=args.calibration_text_key,
+        seed=args.seed,
+        shuffle=not args.disable_calibration_shuffle,
+    )
 
     eval_texts, corpus_metadata = select_eval_texts(
         source=args.calibration_source,
@@ -102,6 +113,7 @@ def main() -> None:
         min_chars=args.calibration_min_chars,
         seed=args.seed,
         shuffle=not args.disable_calibration_shuffle,
+        skip_texts=calibration_skip_texts,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -252,6 +264,7 @@ def main() -> None:
             "batch_size": int(args.batch_size),
             "eval_start_index": int(args.eval_start_index),
             "eval_texts": int(args.eval_texts),
+            "calibration_skip_texts": int(calibration_skip_texts),
             "seed": int(args.seed),
         },
         "bundle_metadata": bundle_metadata,

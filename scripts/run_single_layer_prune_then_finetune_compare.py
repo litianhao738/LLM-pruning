@@ -19,6 +19,7 @@ from utils.finetune_masks import apply_parameter_masks, build_module_weight_mask
 from utils.io_utils import load_tensor_bundle, save_csv_rows, save_json
 from utils.single_layer_utils import (
     build_prune_result,
+    calibration_skip_texts_from_bundle_metadata,
     load_prune_cache,
     method_settings,
     parse_methods,
@@ -178,6 +179,16 @@ def main() -> None:
     W = bundle["W"].to(device=pruning_device, dtype=torch.float32)
     X = bundle["X"].to(device=pruning_device, dtype=torch.float32)
     bundle_metadata = bundle.get("metadata", {})
+    calibration_skip_texts = calibration_skip_texts_from_bundle_metadata(
+        bundle_metadata=bundle_metadata,
+        source=args.calibration_source,
+        dataset_name=args.calibration_dataset_name,
+        dataset_config=args.calibration_dataset_config,
+        split=args.calibration_split,
+        text_key=args.calibration_text_key,
+        seed=args.seed,
+        shuffle=not args.disable_calibration_shuffle,
+    )
 
     finetune_texts, eval_texts, corpus_metadata = select_finetune_and_eval_texts(
         source=args.calibration_source,
@@ -190,6 +201,7 @@ def main() -> None:
         min_chars=args.calibration_min_chars,
         seed=args.seed,
         shuffle=not args.disable_calibration_shuffle,
+        skip_texts=calibration_skip_texts,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -397,6 +409,7 @@ def main() -> None:
             "preserve_pruning_mask": True,
             "reconstruction_error_definition": "pruning_stage_only",
             "prune_cache_dir": str(prune_cache_dir),
+            "calibration_skip_texts": int(calibration_skip_texts),
             "finetune_texts": len(finetune_texts),
             "eval_texts": len(eval_texts),
             "seed": int(args.seed),

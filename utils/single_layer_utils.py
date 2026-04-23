@@ -53,8 +53,11 @@ def select_eval_texts(
     min_chars: int,
     seed: int,
     shuffle: bool,
+    skip_texts: int = 0,
 ) -> tuple[list[str], dict[str, Any]]:
-    required_texts = eval_start_index + eval_texts
+    if skip_texts < 0:
+        raise ValueError(f"skip_texts must be non-negative, got {skip_texts}")
+    required_texts = skip_texts + eval_start_index + eval_texts
     corpus = load_calibration_text_corpus(
         source,
         dataset_name=dataset_name,
@@ -70,10 +73,13 @@ def select_eval_texts(
         raise ValueError(
             f"Not enough texts for evaluation slice: need {required_texts}, got {len(corpus.texts)}"
         )
-    eval_slice = corpus.texts[eval_start_index : eval_start_index + eval_texts]
+    effective_start_index = skip_texts + eval_start_index
+    eval_slice = corpus.texts[effective_start_index : effective_start_index + eval_texts]
     metadata = dict(corpus.metadata)
-    metadata["eval_start_index"] = int(eval_start_index)
+    metadata["eval_start_index"] = int(effective_start_index)
+    metadata["requested_eval_start_index"] = int(eval_start_index)
     metadata["eval_texts"] = int(eval_texts)
+    metadata["skip_texts"] = int(skip_texts)
     return eval_slice, metadata
 
 
@@ -89,20 +95,76 @@ def select_finetune_and_eval_texts(
     min_chars: int,
     seed: int,
     shuffle: bool,
+    skip_texts: int = 0,
 ) -> tuple[list[str], list[str], dict[str, Any]]:
+    if skip_texts < 0:
+        raise ValueError(f"skip_texts must be non-negative, got {skip_texts}")
+    required_texts = skip_texts + finetune_texts + eval_texts
     corpus = load_calibration_text_corpus(
         source,
         dataset_name=dataset_name,
         dataset_config=dataset_config,
         split=split,
         text_key=text_key,
-        max_texts=finetune_texts + eval_texts,
+        max_texts=required_texts,
         min_chars=min_chars,
         seed=seed,
         shuffle=shuffle,
     )
-    finetune_slice, eval_slice = split_texts(corpus.texts, finetune_texts, eval_texts)
-    return finetune_slice, eval_slice, dict(corpus.metadata)
+    sliced_texts = corpus.texts[skip_texts:required_texts]
+    finetune_slice, eval_slice = split_texts(sliced_texts, finetune_texts, eval_texts)
+    metadata = dict(corpus.metadata)
+    metadata["skip_texts"] = int(skip_texts)
+    metadata["finetune_texts"] = int(finetune_texts)
+    metadata["eval_texts"] = int(eval_texts)
+    return finetune_slice, eval_slice, metadata
+
+
+def calibration_skip_texts_from_bundle_metadata(
+    *,
+    bundle_metadata: dict[str, Any],
+    source: str,
+    dataset_name: str,
+    dataset_config: str,
+    split: str,
+    text_key: str,
+    seed: int,
+    shuffle: bool,
+) -> int:
+    if not bundle_metadata:
+        return 0
+
+    bundle_source = bundle_metadata.get("calibration_source")
+    normalized_source = "hf_dataset" if source in {"wikitext103", "hf_dataset"} else source
+    if bundle_source != normalized_source:
+        return 0
+
+    if normalized_source == "hf_dataset":
+        expected = {
+            "dataset_name": dataset_name,
+            "dataset_config": dataset_config,
+            "dataset_split": split,
+            "text_key": text_key,
+            "seed": seed,
+            "shuffle": shuffle,
+        }
+        observed = {
+            "dataset_name": bundle_metadata.get("dataset_name"),
+            "dataset_config": bundle_metadata.get("dataset_config"),
+            "dataset_split": bundle_metadata.get("dataset_split"),
+            "text_key": bundle_metadata.get("text_key"),
+            "seed": bundle_metadata.get("seed"),
+            "shuffle": bundle_metadata.get("shuffle"),
+        }
+        if observed != expected:
+            return 0
+
+    raw_count = bundle_metadata.get("num_texts", 0)
+    try:
+        skip_texts = int(raw_count)
+    except (TypeError, ValueError):
+        return 0
+    return max(skip_texts, 0)
 
 
 def method_settings(
@@ -188,6 +250,7 @@ def build_prune_result(
             "r_min": float(settings["r_min"]),
             "r_max": float(settings["r_max"]),
             "momentum_beta": float(settings["momentum_beta"]),
+            "target_sparsity": float(target_sparsity),
         }
     elif method == "gradient_momentum_fista_original":
         if settings is None:
@@ -197,6 +260,7 @@ def build_prune_result(
             "r_min": float(settings["r_min"]),
             "r_max": float(settings["r_max"]),
             "momentum_beta": float(settings["momentum_beta"]),
+            "target_sparsity": float(target_sparsity),
         }
     else:
         raise ValueError(f"Unsupported method: {method}")

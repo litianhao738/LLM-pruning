@@ -1,6 +1,6 @@
 import torch
 
-from pruning.adaptive_fista import AdaptiveThresholdFISTAPruner
+from pruning.adaptive_fista import AdaptiveThresholdFISTAPruner, sparsity_gap_threshold
 from pruning.base import PruneResult
 from pruning.fista import _objective_value, _reconstruction_error
 from utils.math_utils import estimate_lipschitz_from_gram, gram_matrix, l1_norm, nesterov_coefficient, soft_threshold
@@ -22,6 +22,7 @@ class GradientAwareMomentumFISTAPruner(AdaptiveThresholdFISTAPruner):
         num_iters: int = 50,
         r_min: float = 0.9,
         r_max: float = 1.1,
+        target_sparsity: float = 0.5,
         momentum_beta: float = 1.0,
         lipschitz: float | None = None,
         tolerance: float = 0.0,
@@ -50,6 +51,7 @@ class GradientAwareMomentumFISTAPruner(AdaptiveThresholdFISTAPruner):
             num_iters=num_iters,
             r_min=r_min,
             r_max=r_max,
+            target_sparsity=target_sparsity,
             lipschitz=lipschitz,
             tolerance=tolerance,
         )
@@ -80,11 +82,19 @@ class GradientAwareMomentumFISTAPruner(AdaptiveThresholdFISTAPruner):
         smoothed_grad_norm: float | None = None
         prev_delta: torch.Tensor | None = None
         prev_objective: float | None = None
+        estimated_sparsity = actual_sparsity(U_k)
         eps = 1e-12
         modulation_steps = max(1, int(round(self.num_iters * self.modulation_fraction)))
 
         for step in range(self.num_iters):
-            lambda_k = self.schedule(self.lambda_, step, self.num_iters)
+            lambda_k = sparsity_gap_threshold(
+                self.lambda_,
+                target_sparsity=self.target_sparsity,
+                estimated_sparsity=estimated_sparsity,
+                alpha=self.alpha,
+                r_min=self.r_min,
+                r_max=self.r_max,
+            )
             grad = Z_k @ G - WG
             grad_norm = float(torch.linalg.norm(grad).item())
             if smoothed_grad_norm is None:
@@ -98,6 +108,10 @@ class GradientAwareMomentumFISTAPruner(AdaptiveThresholdFISTAPruner):
             V_k = Z_k - grad / L
             U_next = soft_threshold(V_k, threshold=lambda_k / L)
             diff_norm = torch.linalg.norm(U_next - U_k).item()
+            current_sparsity = actual_sparsity(U_next)
+            estimated_sparsity = (
+                self.ema_beta * estimated_sparsity + (1.0 - self.ema_beta) * current_sparsity
+            )
             base_t_next, base_momentum = nesterov_coefficient(t_k)
 
             # The first FISTA gradient can be exactly zero because we initialize
@@ -139,7 +153,9 @@ class GradientAwareMomentumFISTAPruner(AdaptiveThresholdFISTAPruner):
                     "lambda": float(lambda_k),
                     "objective": float(current_objective),
                     "reconstruction_error": _reconstruction_error(W=W, U=U_next, X=X),
-                    "sparsity": actual_sparsity(U_next),
+                    "sparsity": current_sparsity,
+                    "estimated_sparsity": float(estimated_sparsity),
+                    "sparsity_gap": float(abs(self.target_sparsity - estimated_sparsity)),
                     "diff_norm": float(diff_norm),
                     "grad_norm": float(grad_norm),
                     "smoothed_grad_norm": float(smoothed_grad_norm),
@@ -171,6 +187,7 @@ class GradientAwareMomentumFISTAPruner(AdaptiveThresholdFISTAPruner):
             "method": "gradient_momentum_fista",
             "num_iters": len(history),
             "lambda": self.lambda_,
+            "lambda_final": float(history[-1]["lambda"]) if history else self.lambda_,
             "lipschitz": float(L),
             "actual_sparsity": actual_sparsity(U_k),
             "num_total": int(U_k.numel()),
@@ -179,6 +196,9 @@ class GradientAwareMomentumFISTAPruner(AdaptiveThresholdFISTAPruner):
             "reconstruction_error": _reconstruction_error(W=W, U=U_k, X=X),
             "l1_norm": l1_norm(U_k),
             "objective": _objective_value(W=W, U=U_k, X=X, lambda_=self.lambda_),
+            "target_sparsity": self.target_sparsity,
+            "alpha": self.alpha,
+            "ema_beta": self.ema_beta,
             "r_min": self.r_min,
             "r_max": self.r_max,
             "momentum_beta": self.momentum_beta,
@@ -206,6 +226,7 @@ class OriginalGradientAwareMomentumFISTAPruner(AdaptiveThresholdFISTAPruner):
         num_iters: int = 50,
         r_min: float = 0.9,
         r_max: float = 1.1,
+        target_sparsity: float = 0.5,
         momentum_beta: float = 1.0,
         lipschitz: float | None = None,
         tolerance: float = 0.0,
@@ -218,6 +239,7 @@ class OriginalGradientAwareMomentumFISTAPruner(AdaptiveThresholdFISTAPruner):
             num_iters=num_iters,
             r_min=r_min,
             r_max=r_max,
+            target_sparsity=target_sparsity,
             lipschitz=lipschitz,
             tolerance=tolerance,
         )
@@ -245,15 +267,27 @@ class OriginalGradientAwareMomentumFISTAPruner(AdaptiveThresholdFISTAPruner):
         t_k = 1.0
         history: list[dict[str, float]] = []
         reference_grad_norm: float | None = None
+        estimated_sparsity = actual_sparsity(U_k)
         eps = 1e-12
 
         for step in range(self.num_iters):
-            lambda_k = self.schedule(self.lambda_, step, self.num_iters)
+            lambda_k = sparsity_gap_threshold(
+                self.lambda_,
+                target_sparsity=self.target_sparsity,
+                estimated_sparsity=estimated_sparsity,
+                alpha=self.alpha,
+                r_min=self.r_min,
+                r_max=self.r_max,
+            )
             grad = Z_k @ G - WG
             grad_norm = float(torch.linalg.norm(grad).item())
             V_k = Z_k - grad / L
             U_next = soft_threshold(V_k, threshold=lambda_k / L)
             diff_norm = torch.linalg.norm(U_next - U_k).item()
+            current_sparsity = actual_sparsity(U_next)
+            estimated_sparsity = (
+                self.ema_beta * estimated_sparsity + (1.0 - self.ema_beta) * current_sparsity
+            )
             t_next, base_momentum = nesterov_coefficient(t_k)
 
             if reference_grad_norm is None and grad_norm > eps:
@@ -272,7 +306,9 @@ class OriginalGradientAwareMomentumFISTAPruner(AdaptiveThresholdFISTAPruner):
                     "lambda": float(lambda_k),
                     "objective": float(_objective_value(W=W, U=U_next, X=X, lambda_=lambda_k)),
                     "reconstruction_error": _reconstruction_error(W=W, U=U_next, X=X),
-                    "sparsity": actual_sparsity(U_next),
+                    "sparsity": current_sparsity,
+                    "estimated_sparsity": float(estimated_sparsity),
+                    "sparsity_gap": float(abs(self.target_sparsity - estimated_sparsity)),
                     "diff_norm": float(diff_norm),
                     "grad_norm": float(grad_norm),
                     "reference_grad_norm": float(reference_grad_norm or 0.0),
@@ -294,6 +330,7 @@ class OriginalGradientAwareMomentumFISTAPruner(AdaptiveThresholdFISTAPruner):
             "method": "gradient_momentum_fista_original",
             "num_iters": len(history),
             "lambda": self.lambda_,
+            "lambda_final": float(history[-1]["lambda"]) if history else self.lambda_,
             "lipschitz": float(L),
             "actual_sparsity": actual_sparsity(U_k),
             "num_total": int(U_k.numel()),
@@ -302,6 +339,9 @@ class OriginalGradientAwareMomentumFISTAPruner(AdaptiveThresholdFISTAPruner):
             "reconstruction_error": _reconstruction_error(W=W, U=U_k, X=X),
             "l1_norm": l1_norm(U_k),
             "objective": _objective_value(W=W, U=U_k, X=X, lambda_=self.lambda_),
+            "target_sparsity": self.target_sparsity,
+            "alpha": self.alpha,
+            "ema_beta": self.ema_beta,
             "r_min": self.r_min,
             "r_max": self.r_max,
             "momentum_beta": self.momentum_beta,
